@@ -1,0 +1,237 @@
+package chat
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"strings"
+	"time"
+
+	"iq-home/go_beckend/internal/app/config"
+)
+
+type Service struct {
+	Cfg  config.Config
+	HTTP *http.Client
+}
+
+func New(cfg config.Config, httpClient *http.Client) *Service {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 15 * time.Second}
+	}
+	return &Service{Cfg: cfg, HTTP: httpClient}
+}
+
+func (s *Service) Handle(w http.ResponseWriter, r *http.Request) {
+	var req ChatRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("chat req=unknown bad request: %v", err)
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	s.handleMessage(w, r, req)
+}
+
+func (s *Service) handleMessage(w http.ResponseWriter, r *http.Request, req ChatRequest) {
+	reqID := fmt.Sprintf("chat-%d", time.Now().UnixNano())
+	if strings.TrimSpace(req.Message) == "" {
+		log.Printf("chat req=%s empty message", reqID)
+		http.Error(w, "message is required", http.StatusBadRequest)
+		return
+	}
+	matchCount := req.MatchCount
+	if matchCount <= 0 {
+		matchCount = 5
+	}
+	if matchCount > 20 {
+		matchCount = 20
+	}
+	log.Printf("chat req=%s start session_id=%s message_len=%d match_count=%d topic_filter=%v",
+		reqID, strings.TrimSpace(req.SessionID), len(req.Message), matchCount, req.TopicFilter != nil)
+
+	sessionID := strings.TrimSpace(req.SessionID)
+	userID := strings.TrimSpace(derefString(req.UserID))
+	var history []chatMessageRow
+	if sessionID != "" {
+		if err := s.ensureChatSession(r.Context(), sessionID, userID); err != nil {
+			log.Printf("chat req=%s ensure session failed: %v", reqID, err)
+		} else {
+			humanMode, err := s.fetchHumanMode(r.Context(), sessionID)
+			if err != nil {
+				log.Printf("chat req=%s human mode check failed: %v", reqID, err)
+			}
+			if humanMode {
+				log.Printf("chat req=%s human mode=true skip ai", reqID)
+				if err := s.insertChatMessages(r.Context(), []chatMessageInsert{
+					{SessionID: sessionID, Role: "user", Content: req.Message, MetaData: map[string]interface{}{}},
+				}); err != nil {
+					log.Printf("chat req=%s insert messages failed: %v", reqID, err)
+				}
+				resp := ChatResponse{Answer: "", Products: nil, Knowledge: nil}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(resp)
+				return
+			}
+			historyStart := time.Now()
+			history, err = s.fetchChatHistory(r.Context(), sessionID, 20)
+			if err != nil {
+				log.Printf("chat req=%s history load failed: %v", reqID, err)
+			} else {
+				log.Printf("chat req=%s history loaded count=%d took=%s",
+					reqID, len(history), time.Since(historyStart))
+			}
+		}
+	}
+
+	userWantsQuote := detectKpIntent(req.Message, history)
+	if userWantsQuote {
+		log.Printf("chat req=%s quote intent=true", reqID)
+	}
+
+	decisionStart := time.Now()
+	needProducts, err := s.decideProductSearch(r.Context(), req.Message)
+	if err != nil {
+		log.Printf("chat req=%s product decision failed: %v", reqID, err)
+		needProducts = true
+	}
+	log.Printf("chat req=%s product decision=%v took=%s", reqID, needProducts, time.Since(decisionStart))
+	if userWantsQuote {
+		needProducts = true
+		log.Printf("chat req=%s force product search for quote", reqID)
+	}
+
+	embedStart := time.Now()
+	embedding, err := s.getEmbedding(r.Context(), req.Message)
+	if err != nil {
+		log.Printf("chat req=%s embedding failed: %v", reqID, err)
+		http.Error(w, "embedding failed", http.StatusBadGateway)
+		return
+	}
+	log.Printf("chat req=%s embedding ok dims=%d took=%s", reqID, len(embedding), time.Since(embedStart))
+
+	vector := vectorString(embedding)
+
+	filter := map[string]interface{}{}
+	if req.TopicFilter != nil && strings.TrimSpace(*req.TopicFilter) != "" {
+		filter["topic"] = strings.TrimSpace(*req.TopicFilter)
+	}
+
+	knowledgePayload := map[string]interface{}{
+		"query_embedding": vector,
+		"match_threshold": 0.75,
+		"match_count":     1,
+		"filter":          filter,
+	}
+
+	var products []SupabaseMatch
+	if needProducts {
+		productsStart := time.Now()
+		products, err = s.searchProductsHybrid(r.Context(), req.Message, vector, matchCount)
+		if err != nil {
+			log.Printf("chat req=%s supabase products failed: %v", reqID, err)
+			http.Error(w, "supabase products search failed", http.StatusBadGateway)
+			return
+		}
+		log.Printf("chat req=%s products ok count=%d ids=%s names=%s took=%s",
+			reqID, len(products), joinProductIDs(products, 5), joinProductNames(products, 3), time.Since(productsStart))
+	}
+	if len(products) == 0 && isFollowUpMessage(req.Message) {
+		reused, err := s.loadProductsFromHistory(r.Context(), history)
+		if err != nil {
+			log.Printf("chat req=%s reuse products failed: %v", reqID, err)
+		} else if len(reused) > 0 {
+			products = reused
+			log.Printf("chat req=%s reuse products ok count=%d ids=%s", reqID, len(products), joinProductIDs(products, 5))
+		}
+	}
+
+	if userWantsQuote && len(products) > 0 {
+		pdfStart := time.Now()
+		pdfBytes, err := s.generateQuotePDF(products)
+		if err != nil {
+			log.Printf("chat req=%s quote pdf failed: %v", reqID, err)
+			http.Error(w, "quote generation failed", http.StatusBadGateway)
+			return
+		}
+		if sessionID != "" {
+			userMeta := map[string]interface{}{}
+			if hasKPOffered(history) {
+				userMeta["kp_accept"] = true
+			}
+			assistantMeta := map[string]interface{}{"kp_pdf": true}
+			if err := s.insertChatMessages(r.Context(), []chatMessageInsert{
+				{SessionID: sessionID, Role: "user", Content: req.Message, MetaData: userMeta},
+				{SessionID: sessionID, Role: "assistant", Content: "Сформировано КП", MetaData: assistantMeta},
+			}); err != nil {
+				log.Printf("chat req=%s insert messages failed: %v", reqID, err)
+			}
+		}
+		w.Header().Set("Content-Type", "application/pdf")
+		w.Header().Set("Content-Disposition", `attachment; filename="KP.pdf"`)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(pdfBytes)
+		log.Printf("chat req=%s quote pdf ok bytes=%d took=%s", reqID, len(pdfBytes), time.Since(pdfStart))
+		return
+	}
+
+	knowledgeStart := time.Now()
+	var knowledge []SupabaseMatch
+	if err := s.callSupabaseRPC(r.Context(), "match_sales_knowledge", knowledgePayload, &knowledge); err != nil {
+		log.Printf("chat req=%s supabase knowledge failed: %v", reqID, err)
+		http.Error(w, "supabase knowledge search failed", http.StatusBadGateway)
+		return
+	}
+	log.Printf("chat req=%s knowledge ok count=%d took=%s", reqID, len(knowledge), time.Since(knowledgeStart))
+
+	openAIStart := time.Now()
+	answer, err := s.callOpenAI(r.Context(), req.Message, history, products, knowledge)
+	if err != nil {
+		log.Printf("chat req=%s openai failed: %v", reqID, err)
+		http.Error(w, "openai generation failed", http.StatusBadGateway)
+		return
+	}
+	if strings.TrimSpace(answer) == "" {
+		answer = "Нашёл несколько вариантов. Уточните, пожалуйста, что именно нужно (тип/серия/цвет)."
+	}
+	log.Printf("chat req=%s openai ok answer_len=%d took=%s", reqID, len(answer), time.Since(openAIStart))
+	if needProducts && len(products) > 0 {
+		answer = appendProductLinks(answer, products)
+	}
+
+	offerKp := false
+	if needProducts && len(products) > 0 && !userWantsQuote && !hasKPOffered(history) {
+		offerKp = true
+		answer = strings.TrimSpace(answer) + "\n\nМогу собрать КП — собрать?"
+	}
+
+	if sessionID != "" {
+		userMeta := map[string]interface{}{}
+		if userWantsQuote && hasKPOffered(history) {
+			userMeta["kp_accept"] = true
+		}
+		assistantMeta := map[string]interface{}{}
+		if offerKp {
+			assistantMeta["kp_offer"] = true
+		}
+		if len(products) > 0 {
+			assistantMeta["product_ids"] = collectProductIDs(products)
+		}
+		log.Printf("chat req=%s persist session_id=%s user_meta=%t assistant_meta_keys=%d", reqID, sessionID, len(userMeta) > 0, len(assistantMeta))
+		if err := s.insertChatMessages(r.Context(), []chatMessageInsert{
+			{SessionID: sessionID, Role: "user", Content: req.Message, MetaData: userMeta},
+			{SessionID: sessionID, Role: "assistant", Content: answer, MetaData: assistantMeta},
+		}); err != nil {
+			log.Printf("chat req=%s insert messages failed: %v", reqID, err)
+		} else {
+			log.Printf("chat req=%s insert messages ok", reqID)
+		}
+	} else {
+		log.Printf("chat req=%s session_id missing, skipping persistence", reqID)
+	}
+
+	resp := ChatResponse{Answer: answer, Products: products, Knowledge: knowledge}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+	log.Printf("chat req=%s done products=%d knowledge=%d", reqID, len(products), len(knowledge))
+}
