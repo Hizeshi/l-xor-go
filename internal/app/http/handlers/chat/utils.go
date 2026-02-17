@@ -191,6 +191,167 @@ func isShortYes(msg string) bool {
 	return true
 }
 
+func mergeMeta(dst, src map[string]interface{}) map[string]interface{} {
+	if src == nil {
+		return dst
+	}
+	if dst == nil {
+		dst = map[string]interface{}{}
+	}
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func detectPingMessage(msg string) bool {
+	m := strings.ToLower(strings.TrimSpace(msg))
+	if m == "" {
+		return false
+	}
+	pings := []string{"вы тут", "ты тут", "алло", "вы здесь", "ты здесь", "живы", "на связи"}
+	for _, p := range pings {
+		if strings.Contains(m, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func detectAssortmentQuery(msg string) string {
+	m := strings.ToLower(strings.TrimSpace(msg))
+	if m == "" {
+		return ""
+	}
+	if strings.Contains(m, "какие цвет") || strings.Contains(m, "какого цвет") {
+		return "colors"
+	}
+	if strings.Contains(m, "какие брен") || strings.Contains(m, "какого брен") || strings.Contains(m, "какие марки") {
+		return "brands"
+	}
+	if strings.Contains(m, "какие сери") || strings.Contains(m, "каких сери") {
+		return "series"
+	}
+	if strings.Contains(m, "какие тип") || strings.Contains(m, "какого тип") || strings.Contains(m, "какие виды") {
+		return "types"
+	}
+	return ""
+}
+
+func extractSlots(msg string) map[string]string {
+	m := strings.ToLower(strings.TrimSpace(msg))
+	if m == "" {
+		return nil
+	}
+	slots := map[string]string{}
+	colors := []string{"бел", "черн", "черный", "чёрн", "сер", "серый", "графит", "сереб", "золот", "мокко", "тауп", "сахар", "беж", "алюмин", "бронз", "антрац"}
+	types := []string{"розет", "выключ", "рамк", "кабель", "вилк", "патрон", "люстр", "светиль", "реле", "автомат", "щит", "удлин", "диммер", "датчик", "шнур"}
+	for _, c := range colors {
+		if strings.Contains(m, c) {
+			slots["last_color"] = c
+			break
+		}
+	}
+	for _, t := range types {
+		if strings.Contains(m, t) {
+			slots["last_product_type"] = t
+			break
+		}
+	}
+	if len(slots) == 0 {
+		return nil
+	}
+	return slots
+}
+
+func isLikelyProductQuery(msg string) bool {
+	m := strings.ToLower(strings.TrimSpace(msg))
+	if m == "" {
+		return false
+	}
+	productKeywords := []string{
+		"розет", "выключ", "рамк", "кабель", "вилк", "патрон", "люстр", "светиль",
+		"реле", "автомат", "щит", "удлин", "диммер", "датчик", "шнур",
+	}
+	for _, k := range productKeywords {
+		if strings.Contains(m, k) {
+			return true
+		}
+	}
+	return false
+}
+
+func mergeSlots(dst, src map[string]string) map[string]string {
+	if src == nil {
+		return dst
+	}
+	if dst == nil {
+		dst = map[string]string{}
+	}
+	for k, v := range src {
+		if strings.TrimSpace(v) == "" {
+			continue
+		}
+		dst[k] = v
+	}
+	return dst
+}
+
+func latestSummary(history []chatMessageRow) string {
+	for i := len(history) - 1; i >= 0; i-- {
+		m := history[i]
+		if m.MetaData == nil {
+			continue
+		}
+		if v, ok := m.MetaData["summary"]; ok {
+			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+	}
+	return ""
+}
+
+func latestSlots(history []chatMessageRow) map[string]string {
+	for i := len(history) - 1; i >= 0; i-- {
+		m := history[i]
+		if m.MetaData == nil {
+			continue
+		}
+		if v, ok := m.MetaData["slots"]; ok {
+			if m2, ok := v.(map[string]interface{}); ok {
+				out := map[string]string{}
+				for k, val := range m2 {
+					out[k] = strings.TrimSpace(fmt.Sprintf("%v", val))
+				}
+				if len(out) > 0 {
+					return out
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func shouldUpdateSummary(history []chatMessageRow, threshold int) bool {
+	if threshold <= 0 {
+		threshold = 6
+	}
+	lastSummaryIndex := -1
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].MetaData != nil {
+			if _, ok := history[i].MetaData["summary"]; ok {
+				lastSummaryIndex = i
+				break
+			}
+		}
+	}
+	if lastSummaryIndex == -1 {
+		return len(history) >= threshold
+	}
+	return len(history)-1-lastSummaryIndex >= threshold
+}
+
 func toString(v interface{}) string {
 	switch t := v.(type) {
 	case string:

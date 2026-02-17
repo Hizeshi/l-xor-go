@@ -5,11 +5,44 @@ import "strings"
 func buildContext(history []chatMessageRow, products []SupabaseMatch, knowledge []SupabaseMatch) string {
 	var b strings.Builder
 
+	summary := latestSummary(history)
+	slots := latestSlots(history)
+	if summary != "" {
+		b.WriteString("Сводка:\n")
+		b.WriteString(summary)
+		b.WriteString("\n\n")
+	}
+	if len(slots) > 0 {
+		b.WriteString("Текущие предпочтения: ")
+		parts := make([]string, 0, len(slots))
+		if v := strings.TrimSpace(slots["last_product_type"]); v != "" {
+			parts = append(parts, "тип="+v)
+		}
+		if v := strings.TrimSpace(slots["last_color"]); v != "" {
+			parts = append(parts, "цвет="+v)
+		}
+		if v := strings.TrimSpace(slots["last_series"]); v != "" {
+			parts = append(parts, "серия="+v)
+		}
+		if v := strings.TrimSpace(slots["last_room"]); v != "" {
+			parts = append(parts, "комната="+v)
+		}
+		if v := strings.TrimSpace(slots["last_intent"]); v != "" {
+			parts = append(parts, "намерение="+v)
+		}
+		b.WriteString(strings.Join(parts, ", "))
+		b.WriteString("\n\n")
+	}
+
 	if len(history) == 0 {
 		b.WriteString("История: нет.\n")
 	} else {
 		b.WriteString("История:\n")
-		for _, m := range history {
+		start := 0
+		if len(history) > 15 {
+			start = len(history) - 15
+		}
+		for _, m := range history[start:] {
 			role := strings.ToLower(strings.TrimSpace(m.Role))
 			switch role {
 			case "assistant":

@@ -22,6 +22,8 @@ type Config struct {
 	TelegramBotToken       string
 	TelegramWebhookSecret  string
 	TelegramBaseURL        string
+	ManagerChatID          string
+	DirectorChatID         string
 }
 
 func MustLoad() Config {
@@ -42,6 +44,8 @@ func MustLoad() Config {
 		TelegramBotToken:       env("TELEGRAM_BOT_TOKEN", ""),
 		TelegramWebhookSecret:  env("TELEGRAM_WEBHOOK_SECRET", ""),
 		TelegramBaseURL:        env("TELEGRAM_BASE_URL", "https://api.telegram.org"),
+		ManagerChatID:          env("MANAGER_CHAT_ID", ""),
+		DirectorChatID:         env("DIRECTOR_CHAT_ID", ""),
 	}
 }
 

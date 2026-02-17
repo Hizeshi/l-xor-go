@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -74,7 +75,7 @@ func (s *Service) handleMessage(w http.ResponseWriter, r *http.Request, req Chat
 				return
 			}
 			historyStart := time.Now()
-			history, err = s.fetchChatHistory(r.Context(), sessionID, 20)
+			history, err = s.fetchChatHistory(r.Context(), sessionID, 30)
 			if err != nil {
 				log.Printf("chat req=%s history load failed: %v", reqID, err)
 			} else {
@@ -82,6 +83,46 @@ func (s *Service) handleMessage(w http.ResponseWriter, r *http.Request, req Chat
 					reqID, len(history), time.Since(historyStart))
 			}
 		}
+	}
+
+	if detectPingMessage(req.Message) {
+		answer := "Да, я здесь. Чем могу помочь?"
+		if sessionID != "" {
+			userMeta := mergeMeta(nil, req.UserMeta)
+			assistantMeta := map[string]interface{}{"slots": extractSlots(req.Message)}
+			if err := s.insertChatMessages(r.Context(), []chatMessageInsert{
+				{SessionID: sessionID, Role: "user", Content: req.Message, MetaData: userMeta},
+				{SessionID: sessionID, Role: "assistant", Content: answer, MetaData: assistantMeta},
+			}); err != nil {
+				log.Printf("chat req=%s insert messages failed: %v", reqID, err)
+			}
+		}
+		resp := ChatResponse{Answer: answer, Products: nil, Knowledge: nil}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	if kind := detectAssortmentQuery(req.Message); kind != "" {
+		answer, err := s.handleAssortmentQuery(r.Context(), kind)
+		if err != nil {
+			log.Printf("chat req=%s assortment failed: %v", reqID, err)
+			http.Error(w, "assortment lookup failed", http.StatusBadGateway)
+			return
+		}
+		if sessionID != "" {
+			userMeta := mergeMeta(nil, req.UserMeta)
+			if err := s.insertChatMessages(r.Context(), []chatMessageInsert{
+				{SessionID: sessionID, Role: "user", Content: req.Message, MetaData: userMeta},
+				{SessionID: sessionID, Role: "assistant", Content: answer, MetaData: map[string]interface{}{}},
+			}); err != nil {
+				log.Printf("chat req=%s insert messages failed: %v", reqID, err)
+			}
+		}
+		resp := ChatResponse{Answer: answer, Products: nil, Knowledge: nil}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+		return
 	}
 
 	userWantsQuote := detectKpIntent(req.Message, history)
@@ -184,6 +225,15 @@ func (s *Service) handleMessage(w http.ResponseWriter, r *http.Request, req Chat
 	}
 	log.Printf("chat req=%s knowledge ok count=%d took=%s", reqID, len(knowledge), time.Since(knowledgeStart))
 
+	var escRule *escalationRule
+	if sessionID != "" {
+		if rule, err := s.fetchEscalationRule(r.Context(), vector); err != nil {
+			log.Printf("chat req=%s escalation rule fetch failed: %v", reqID, err)
+		} else {
+			escRule = rule
+		}
+	}
+
 	openAIStart := time.Now()
 	answer, err := s.callOpenAI(r.Context(), req.Message, history, products, knowledge)
 	if err != nil {
@@ -195,7 +245,7 @@ func (s *Service) handleMessage(w http.ResponseWriter, r *http.Request, req Chat
 		answer = "Нашёл несколько вариантов. Уточните, пожалуйста, что именно нужно (тип/серия/цвет)."
 	}
 	log.Printf("chat req=%s openai ok answer_len=%d took=%s", reqID, len(answer), time.Since(openAIStart))
-	if needProducts && len(products) > 0 {
+	if needProducts && len(products) > 0 && isLikelyProductQuery(req.Message) {
 		answer = appendProductLinks(answer, products)
 	}
 
@@ -210,6 +260,8 @@ func (s *Service) handleMessage(w http.ResponseWriter, r *http.Request, req Chat
 		if userWantsQuote && hasKPOffered(history) {
 			userMeta["kp_accept"] = true
 		}
+		userMeta = mergeMeta(userMeta, req.UserMeta)
+
 		assistantMeta := map[string]interface{}{}
 		if offerKp {
 			assistantMeta["kp_offer"] = true
@@ -217,6 +269,21 @@ func (s *Service) handleMessage(w http.ResponseWriter, r *http.Request, req Chat
 		if len(products) > 0 {
 			assistantMeta["product_ids"] = collectProductIDs(products)
 		}
+		assistantMeta["slots"] = mergeSlots(latestSlots(history), extractSlots(req.Message))
+		if shouldUpdateSummary(history, 6) {
+			if summary, err := s.summarizeHistory(r.Context(), history, answer); err == nil && strings.TrimSpace(summary) != "" {
+				assistantMeta["summary"] = summary
+			} else if err != nil {
+				log.Printf("chat req=%s summary update failed: %v", reqID, err)
+			}
+		}
+		assistantMeta["slots"] = mergeSlots(latestSlots(history), extractSlots(req.Message))
+		if escRule != nil {
+			if state := s.maybeEscalate(r.Context(), sessionID, req.Message, answer, history, escRule); state != nil {
+				assistantMeta["escalation"] = state
+			}
+		}
+
 		log.Printf("chat req=%s persist session_id=%s user_meta=%t assistant_meta_keys=%d", reqID, sessionID, len(userMeta) > 0, len(assistantMeta))
 		if err := s.insertChatMessages(r.Context(), []chatMessageInsert{
 			{SessionID: sessionID, Role: "user", Content: req.Message, MetaData: userMeta},
@@ -234,4 +301,44 @@ func (s *Service) handleMessage(w http.ResponseWriter, r *http.Request, req Chat
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 	log.Printf("chat req=%s done products=%d knowledge=%d", reqID, len(products), len(knowledge))
+}
+
+func (s *Service) handleAssortmentQuery(ctx context.Context, kind string) (string, error) {
+	var values []string
+	var err error
+	switch kind {
+	case "colors":
+		values, err = s.fetchDistinctValues(ctx, "colors", "name", 100)
+	case "brands":
+		values, err = s.fetchDistinctValues(ctx, "brands", "name", 100)
+	case "series":
+		values, err = s.fetchDistinctValues(ctx, "product_series", "name", 100)
+	case "types":
+		values, err = s.fetchProductTypes(ctx, 500)
+	default:
+		return "", fmt.Errorf("unknown assortment kind")
+	}
+	if err != nil {
+		return "", err
+	}
+	if len(values) == 0 {
+		return "Сейчас нет данных по ассортименту. Уточните, что именно ищете.", nil
+	}
+	max := 20
+	if len(values) < max {
+		max = len(values)
+	}
+	list := strings.Join(values[:max], ", ")
+	switch kind {
+	case "colors":
+		return "Доступные цвета: " + list + ". Уточните тип товара (розетки/выключатели/рамки).", nil
+	case "brands":
+		return "Доступные бренды: " + list + ". Уточните тип товара и цвет.", nil
+	case "series":
+		return "Доступные серии: " + list + ". Уточните тип товара и цвет.", nil
+	case "types":
+		return "Доступные типы: " + list + ". Уточните цвет или серию.", nil
+	default:
+		return "Уточните, что именно ищете.", nil
+	}
 }

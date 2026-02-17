@@ -87,7 +87,7 @@ func (s *Service) fetchChatHistory(ctx context.Context, sessionID string, limit 
 		limit = 10
 	}
 	values := url.Values{}
-	values.Set("select", "role,content,meta_data,created_at")
+	values.Set("select", "role,content,meta_data,created_at,sender_type")
 	values.Set("session_id", "eq."+sessionID)
 	values.Set("order", "created_at.asc")
 	values.Set("limit", strconv.Itoa(limit))
@@ -116,6 +116,109 @@ func (s *Service) fetchChatHistory(ctx context.Context, sessionID string, limit 
 		return nil, err
 	}
 	return rows, nil
+}
+
+func (s *Service) fetchDistinctValues(ctx context.Context, table, field string, limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	values := url.Values{}
+	values.Set("select", field)
+	values.Set("order", field+".asc")
+	values.Set("limit", strconv.Itoa(limit))
+
+	urlStr := strings.TrimRight(s.Cfg.SupabaseURL, "/") + "/rest/v1/" + table + "?" + values.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("apikey", s.Cfg.SupabaseServiceRoleKey)
+	req.Header.Set("Authorization", "Bearer "+s.Cfg.SupabaseServiceRoleKey)
+
+	resp, err := s.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return nil, fmt.Errorf("supabase status %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
+	}
+
+	var rows []map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		return nil, err
+	}
+	uniq := map[string]struct{}{}
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if v, ok := r[field]; ok {
+			sv := strings.TrimSpace(fmt.Sprintf("%v", v))
+			if sv == "" {
+				continue
+			}
+			if _, ok := uniq[sv]; ok {
+				continue
+			}
+			uniq[sv] = struct{}{}
+			out = append(out, sv)
+		}
+	}
+	return out, nil
+}
+
+func (s *Service) fetchProductTypes(ctx context.Context, limit int) ([]string, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	values := url.Values{}
+	values.Set("select", "product_type")
+	values.Set("order", "product_type.asc")
+	values.Set("limit", strconv.Itoa(limit))
+
+	urlStr := strings.TrimRight(s.Cfg.SupabaseURL, "/") + "/rest/v1/products_full?" + values.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("apikey", s.Cfg.SupabaseServiceRoleKey)
+	req.Header.Set("Authorization", "Bearer "+s.Cfg.SupabaseServiceRoleKey)
+
+	resp, err := s.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return nil, fmt.Errorf("supabase status %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
+	}
+
+	var rows []struct {
+		ProductType *string `json:"product_type"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		return nil, err
+	}
+	uniq := map[string]struct{}{}
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if r.ProductType == nil {
+			continue
+		}
+		sv := strings.TrimSpace(*r.ProductType)
+		if sv == "" {
+			continue
+		}
+		if _, ok := uniq[sv]; ok {
+			continue
+		}
+		uniq[sv] = struct{}{}
+		out = append(out, sv)
+	}
+	return out, nil
 }
 
 func (s *Service) fetchHumanMode(ctx context.Context, sessionID string) (bool, error) {

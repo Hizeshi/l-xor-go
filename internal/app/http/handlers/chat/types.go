@@ -1,11 +1,12 @@
 package chat
 
 type ChatRequest struct {
-	Message     string  `json:"message"`
-	SessionID   string  `json:"session_id"`
-	UserID      *string `json:"user_id"`
-	MatchCount  int     `json:"match_count"`
-	TopicFilter *string `json:"topic_filter"`
+	Message     string                 `json:"message"`
+	SessionID   string                 `json:"session_id"`
+	UserID      *string                `json:"user_id"`
+	UserMeta    map[string]interface{} `json:"user_meta,omitempty"`
+	MatchCount  int                    `json:"match_count"`
+	TopicFilter *string                `json:"topic_filter"`
 }
 
 type ChatResponse struct {
@@ -59,10 +60,10 @@ type ollamaEmbeddingResponse struct {
 }
 
 type openAIChatRequest struct {
-	Model       string              `json:"model"`
-	Messages    []openAIChatMessage `json:"messages"`
-	MaxTokens   int                 `json:"max_completion_tokens,omitempty"`
-	Temperature float64             `json:"temperature,omitempty"`
+	Model          string                `json:"model"`
+	Messages       []openAIChatMessage   `json:"messages"`
+	MaxTokens      int                   `json:"max_completion_tokens,omitempty"`
+	Temperature    float64               `json:"temperature,omitempty"`
 	ResponseFormat *openAIResponseFormat `json:"response_format,omitempty"`
 }
 
@@ -86,10 +87,11 @@ type productDecision struct {
 }
 
 type chatMessageRow struct {
-	Role      string                 `json:"role"`
-	Content   string                 `json:"content"`
-	MetaData  map[string]interface{} `json:"meta_data,omitempty"`
-	CreatedAt string                 `json:"created_at,omitempty"`
+	Role       string                 `json:"role"`
+	Content    string                 `json:"content"`
+	MetaData   map[string]interface{} `json:"meta_data,omitempty"`
+	CreatedAt  string                 `json:"created_at,omitempty"`
+	SenderType string                 `json:"sender_type,omitempty"`
 }
 
 type chatMessageInsert struct {
