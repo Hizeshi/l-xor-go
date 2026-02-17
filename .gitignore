@@ -4,3 +4,9 @@ ecosystem.config.js
 
 # Local runtime config
 ecosystem.config.js
+
+# Build outputs
+bin/
+
+# Runtime config
+ecosystem.config.js
