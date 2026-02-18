@@ -67,10 +67,10 @@ func (s *Service) decideProductSearch(ctx context.Context, userMessage string) (
 	return decision.NeedProducts, nil
 }
 
-func (s *Service) callOpenAI(ctx context.Context, userMessage string, history []chatMessageRow, products []SupabaseMatch, knowledge []SupabaseMatch) (string, error) {
-	contextText := buildContext(history, products, knowledge)
+func (s *Service) callOpenAI(ctx context.Context, userMessage string, history []chatMessageRow, products []SupabaseMatch, knowledge []SupabaseMatch, behavior *userBehaviorContext) (string, error) {
+	contextText := buildContext(history, products, knowledge, behavior)
 
-	system := "Ты — консультант по электрофурнитуре. Отвечай коротко (2–4 предложения). Никогда не выдумывай товары, бренды, модели или характеристики. Используй только то, что есть в списке \"Товары\" в контексте. Если товаров нет — так и скажи и задай 1 уточняющий вопрос. Не повторяй вопросы. Не навязывай доп. функции. Все цены указывай в тенге (₸), не упоминай рубли. Если в контексте есть раздел \"Правило\", следуй ему строго. Если вопрос про связь/проверку присутствия (\"вы тут?\", \"алло?\") — ответь кратко без ссылок и без новых предложений. Если пользователь уточняет конкретику — не меняй тему и не предлагай новые товары."
+	system := "Ты — консультант по электрофурнитуре. Отвечай коротко (2–4 предложения). Никогда не выдумывай товары, бренды, модели или характеристики. Используй только то, что есть в списке \"Товары\" и \"Профиль пользователя (сайт)\" в контексте. Если товаров нет — так и скажи и задай 1 уточняющий вопрос. Не повторяй вопросы. Не навязывай доп. функции. Все цены указывай в тенге (₸), не упоминай рубли. Если в контексте есть раздел \"Правило\", следуй ему строго. Если вопрос про связь/проверку присутствия (\"вы тут?\", \"алло?\") — ответь кратко без ссылок и без новых предложений. Если пользователь уточняет конкретику — не меняй тему и не предлагай новые товары."
 
 	prompt := "Вопрос клиента: " + userMessage + "\n\nКонтекст:\n" + contextText
 

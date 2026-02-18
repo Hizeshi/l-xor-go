@@ -2,7 +2,7 @@ package chat
 
 import "strings"
 
-func buildContext(history []chatMessageRow, products []SupabaseMatch, knowledge []SupabaseMatch) string {
+func buildContext(history []chatMessageRow, products []SupabaseMatch, knowledge []SupabaseMatch, behavior *userBehaviorContext) string {
 	var b strings.Builder
 
 	summary := latestSummary(history)
@@ -95,5 +95,31 @@ func buildContext(history []chatMessageRow, products []SupabaseMatch, knowledge 
 		b.WriteString("\n")
 	}
 
+	if behavior != nil {
+		b.WriteString("\nПрофиль пользователя (сайт):\n")
+		writeBehaviorGroup(&b, "Недавно просмотренные", behavior.RecentlyViewed, 5)
+		writeBehaviorGroup(&b, "Избранное", behavior.Favorites, 5)
+		writeBehaviorGroup(&b, "Корзина", behavior.Cart, 5)
+		writeBehaviorGroup(&b, "Покупки (история заказов)", behavior.Orders, 5)
+	}
+
 	return b.String()
+}
+
+func writeBehaviorGroup(b *strings.Builder, title string, items []SupabaseMatch, limit int) {
+	b.WriteString(title)
+	b.WriteString(": ")
+	if len(items) == 0 {
+		b.WriteString("нет\n")
+		return
+	}
+	b.WriteString("\n")
+	for i, p := range items {
+		if i >= limit {
+			break
+		}
+		b.WriteString("- ")
+		b.WriteString(p.Content)
+		b.WriteString("\n")
+	}
 }

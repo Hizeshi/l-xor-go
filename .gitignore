@@ -10,3 +10,6 @@ bin/
 
 # Runtime config
 ecosystem.config.js
+
+# Local DB dump / schema snapshot
+schema.sql

@@ -54,6 +54,7 @@ func (s *Service) handleMessage(w http.ResponseWriter, r *http.Request, req Chat
 	sessionID := strings.TrimSpace(req.SessionID)
 	userID := strings.TrimSpace(derefString(req.UserID))
 	var history []chatMessageRow
+	var behavior *userBehaviorContext
 	if sessionID != "" {
 		if err := s.ensureChatSession(r.Context(), sessionID, userID); err != nil {
 			log.Printf("chat req=%s ensure session failed: %v", reqID, err)
@@ -82,6 +83,16 @@ func (s *Service) handleMessage(w http.ResponseWriter, r *http.Request, req Chat
 				log.Printf("chat req=%s history loaded count=%d took=%s",
 					reqID, len(history), time.Since(historyStart))
 			}
+		}
+	}
+	if userID != "" && shouldUseSitePersonalization(sessionID) {
+		profileStart := time.Now()
+		profile, profileErr := s.fetchUserBehavior(r.Context(), userID)
+		if profileErr != nil {
+			log.Printf("chat req=%s personalization failed: %v", reqID, profileErr)
+		} else if profile != nil {
+			behavior = profile
+			log.Printf("chat req=%s personalization ok recent=%d favorites=%d cart=%d orders=%d took=%s", reqID, len(behavior.RecentlyViewed), len(behavior.Favorites), len(behavior.Cart), len(behavior.Orders), time.Since(profileStart))
 		}
 	}
 
@@ -186,6 +197,15 @@ func (s *Service) handleMessage(w http.ResponseWriter, r *http.Request, req Chat
 			log.Printf("chat req=%s reuse products ok count=%d ids=%s", reqID, len(products), joinProductIDs(products, 5))
 		}
 	}
+	if len(products) > 0 && behavior != nil {
+		products = rankProductsByBehavior(products, behavior)
+	}
+	if len(products) == 0 && needProducts && behavior != nil {
+		products = fallbackProductsFromBehavior(behavior, matchCount)
+		if len(products) > 0 {
+			log.Printf("chat req=%s personalization fallback products count=%d ids=%s", reqID, len(products), joinProductIDs(products, 5))
+		}
+	}
 
 	if userWantsQuote && len(products) > 0 {
 		pdfStart := time.Now()
@@ -235,7 +255,7 @@ func (s *Service) handleMessage(w http.ResponseWriter, r *http.Request, req Chat
 	}
 
 	openAIStart := time.Now()
-	answer, err := s.callOpenAI(r.Context(), req.Message, history, products, knowledge)
+	answer, err := s.callOpenAI(r.Context(), req.Message, history, products, knowledge, behavior)
 	if err != nil {
 		log.Printf("chat req=%s openai failed: %v", reqID, err)
 		http.Error(w, "openai generation failed", http.StatusBadGateway)

@@ -15,6 +15,13 @@ type ChatResponse struct {
 	Knowledge []SupabaseMatch `json:"knowledge"`
 }
 
+type userBehaviorContext struct {
+	RecentlyViewed []SupabaseMatch
+	Favorites      []SupabaseMatch
+	Cart           []SupabaseMatch
+	Orders         []SupabaseMatch
+}
+
 type SupabaseMatch struct {
 	ID         int64                  `json:"id"`
 	Content    string                 `json:"content"`
