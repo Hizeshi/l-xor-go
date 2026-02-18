@@ -53,6 +53,7 @@ func (s *Service) handleMessage(w http.ResponseWriter, r *http.Request, req Chat
 
 	sessionID := strings.TrimSpace(req.SessionID)
 	userID := strings.TrimSpace(derefString(req.UserID))
+	incomingQuotePDF := req.UserMeta != nil && boolMeta(req.UserMeta, "incoming_quote_pdf")
 	var history []chatMessageRow
 	var behavior *userBehaviorContext
 	if sessionID != "" {
@@ -137,6 +138,9 @@ func (s *Service) handleMessage(w http.ResponseWriter, r *http.Request, req Chat
 	}
 
 	userWantsQuote := detectKpIntent(req.Message, history)
+	if incomingQuotePDF {
+		userWantsQuote = false
+	}
 	if userWantsQuote {
 		log.Printf("chat req=%s quote intent=true", reqID)
 	}
@@ -151,6 +155,10 @@ func (s *Service) handleMessage(w http.ResponseWriter, r *http.Request, req Chat
 	if userWantsQuote {
 		needProducts = true
 		log.Printf("chat req=%s force product search for quote", reqID)
+	}
+	if incomingQuotePDF {
+		needProducts = true
+		log.Printf("chat req=%s force product search for incoming quote pdf", reqID)
 	}
 
 	embedStart := time.Now()
@@ -270,7 +278,7 @@ func (s *Service) handleMessage(w http.ResponseWriter, r *http.Request, req Chat
 	}
 
 	offerKp := false
-	if needProducts && len(products) > 0 && !userWantsQuote && !hasKPOffered(history) {
+	if needProducts && len(products) > 0 && !userWantsQuote && !incomingQuotePDF && !hasKPOffered(history) {
 		offerKp = true
 		answer = strings.TrimSpace(answer) + "\n\nМогу собрать КП — собрать?"
 	}
@@ -321,6 +329,24 @@ func (s *Service) handleMessage(w http.ResponseWriter, r *http.Request, req Chat
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 	log.Printf("chat req=%s done products=%d knowledge=%d", reqID, len(products), len(knowledge))
+}
+
+func boolMeta(meta map[string]interface{}, key string) bool {
+	if meta == nil {
+		return false
+	}
+	v, ok := meta[key]
+	if !ok {
+		return false
+	}
+	switch t := v.(type) {
+	case bool:
+		return t
+	case string:
+		return strings.EqualFold(strings.TrimSpace(t), "true")
+	default:
+		return false
+	}
 }
 
 func (s *Service) handleAssortmentQuery(ctx context.Context, kind string) (string, error) {

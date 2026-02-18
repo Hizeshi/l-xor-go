@@ -24,6 +24,7 @@ type Config struct {
 	TelegramBaseURL        string
 	ManagerChatID          string
 	DirectorChatID         string
+	CORSAllowOrigin        string
 }
 
 func MustLoad() Config {
@@ -46,6 +47,7 @@ func MustLoad() Config {
 		TelegramBaseURL:        env("TELEGRAM_BASE_URL", "https://api.telegram.org"),
 		ManagerChatID:          env("MANAGER_CHAT_ID", ""),
 		DirectorChatID:         env("DIRECTOR_CHAT_ID", ""),
+		CORSAllowOrigin:        env("CORS_ALLOW_ORIGIN", "*"),
 	}
 }
 

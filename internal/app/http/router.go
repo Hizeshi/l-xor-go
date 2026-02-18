@@ -15,13 +15,14 @@ func NewRouter(cfg config.Config, db *postgres.DB) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.Logging)
+	r.Use(middleware.CORS(cfg.CORSAllowOrigin))
 
 	h := handlers.New(db, cfg)
 
 	r.Get("/health", h.Health)
 
 	r.Route("/v1", func(r chi.Router) {
-		
+
 		r.Post("/telegram/webhook", h.TelegramWebhook)
 
 		r.Group(func(r chi.Router) {

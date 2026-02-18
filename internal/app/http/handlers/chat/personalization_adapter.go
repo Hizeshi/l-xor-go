@@ -2,13 +2,19 @@ package chat
 
 import (
 	"context"
+	"regexp"
 	"strings"
 
 	"iq-home/go_beckend/internal/domain/ai/messenger"
 	"iq-home/go_beckend/internal/domain/ai/site"
 )
 
+var uuidRE = regexp.MustCompile(`(?i)^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$`)
+
 func (s *Service) fetchUserBehavior(ctx context.Context, userID string) (*userBehaviorContext, error) {
+	if !isUUID(userID) {
+		return nil, nil
+	}
 	p := site.Personalizer{
 		SupabaseURL:            s.Cfg.SupabaseURL,
 		SupabaseServiceRoleKey: s.Cfg.SupabaseServiceRoleKey,
@@ -19,6 +25,10 @@ func (s *Service) fetchUserBehavior(ctx context.Context, userID string) (*userBe
 		return nil, err
 	}
 	return fromSiteBehavior(behavior), nil
+}
+
+func isUUID(v string) bool {
+	return uuidRE.MatchString(strings.TrimSpace(v))
 }
 
 func rankProductsByBehavior(products []SupabaseMatch, behavior *userBehaviorContext) []SupabaseMatch {
