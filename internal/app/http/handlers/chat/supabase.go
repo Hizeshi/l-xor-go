@@ -52,7 +52,11 @@ func (s *Service) ensureChatSession(ctx context.Context, sessionID, userID strin
 		"updated_at": time.Now().UTC().Format(time.RFC3339),
 	}
 	if userID != "" {
-		payload["user_id"] = userID
+		if isUUID(userID) {
+			payload["auth_user_id"] = strings.ToLower(userID)
+		} else {
+			payload["user_id"] = userID
+		}
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -262,6 +266,22 @@ func (s *Service) insertChatMessages(ctx context.Context, rows []chatMessageInse
 	if len(rows) == 0 {
 		return nil
 	}
+	// Safety net: ensure every session exists even if caller skipped ensureChatSession.
+	seenSessions := make(map[string]struct{}, len(rows))
+	for _, row := range rows {
+		sid := strings.TrimSpace(row.SessionID)
+		if sid == "" {
+			continue
+		}
+		if _, ok := seenSessions[sid]; ok {
+			continue
+		}
+		seenSessions[sid] = struct{}{}
+		if err := s.ensureChatSession(ctx, sid, ""); err != nil {
+			return fmt.Errorf("ensure chat session %s failed: %w", sid, err)
+		}
+	}
+
 	body, err := json.Marshal(rows)
 	if err != nil {
 		return err

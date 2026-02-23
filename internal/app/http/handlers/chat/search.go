@@ -258,3 +258,137 @@ func joinIDs(ids []int64) string {
 	}
 	return strings.Join(parts, ",")
 }
+
+func (s *Service) searchProductsByArticles(ctx context.Context, articles []string, limit int) ([]SupabaseMatch, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	normalized := normalizeArticles(articles)
+	if len(normalized) == 0 {
+		return nil, nil
+	}
+	seen := map[int64]struct{}{}
+	out := make([]SupabaseMatch, 0, limit)
+	// 1) Diversify: first pass returns at most one item per article.
+	for _, article := range normalized {
+		if len(out) >= limit {
+			break
+		}
+		rows, err := s.fetchProductsByArticle(ctx, article, 1)
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			if _, ok := seen[row.ID]; ok {
+				continue
+			}
+			seen[row.ID] = struct{}{}
+			out = append(out, row)
+		}
+	}
+	// 2) Fill remaining slots: allow extra matches per article.
+	if len(out) < limit {
+		for _, article := range normalized {
+			if len(out) >= limit {
+				break
+			}
+			rows, err := s.fetchProductsByArticle(ctx, article, 5)
+			if err != nil {
+				return nil, err
+			}
+			for _, row := range rows {
+				if _, ok := seen[row.ID]; ok {
+					continue
+				}
+				seen[row.ID] = struct{}{}
+				out = append(out, row)
+				if len(out) >= limit {
+					break
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+func (s *Service) fetchProductsByArticle(ctx context.Context, article string, limit int) ([]SupabaseMatch, error) {
+	if limit <= 0 {
+		limit = 1
+	}
+	values := url.Values{}
+	values.Set("select", "id,article,name_raw,price,product_type")
+	values.Set("article", "ilike.%"+article+"%")
+	values.Set("order", "id.desc")
+	values.Set("limit", strconv.Itoa(limit))
+
+	urlStr := strings.TrimRight(s.Cfg.SupabaseURL, "/") + "/rest/v1/products?" + values.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("apikey", s.Cfg.SupabaseServiceRoleKey)
+	req.Header.Set("Authorization", "Bearer "+s.Cfg.SupabaseServiceRoleKey)
+
+	resp, err := s.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("supabase status %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
+	}
+
+	var rows []struct {
+		ID          int64    `json:"id"`
+		Article     *string  `json:"article"`
+		NameRaw     string   `json:"name_raw"`
+		Price       *float64 `json:"price"`
+		ProductType *string  `json:"product_type"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rows); err != nil {
+		return nil, err
+	}
+
+	out := make([]SupabaseMatch, 0, len(rows))
+	for _, r := range rows {
+		content := strings.TrimSpace(r.NameRaw)
+		if r.Price != nil {
+			content += fmt.Sprintf(" | Цена: %v", *r.Price)
+		}
+		meta := map[string]interface{}{"name": r.NameRaw}
+		if r.Article != nil {
+			meta["article"] = *r.Article
+		}
+		if r.Price != nil {
+			meta["price"] = *r.Price
+		}
+		if r.ProductType != nil {
+			meta["type"] = *r.ProductType
+		}
+		out = append(out, SupabaseMatch{
+			ID:       r.ID,
+			Content:  content,
+			Metadata: meta,
+		})
+	}
+	return out, nil
+}
+
+func normalizeArticles(in []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(in))
+	for _, a := range in {
+		a = strings.ToUpper(strings.TrimSpace(a))
+		if a == "" || len(a) < 3 {
+			continue
+		}
+		if _, ok := seen[a]; ok {
+			continue
+		}
+		seen[a] = struct{}{}
+		out = append(out, a)
+	}
+	return out
+}

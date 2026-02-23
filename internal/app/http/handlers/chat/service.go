@@ -48,12 +48,13 @@ func (s *Service) handleMessage(w http.ResponseWriter, r *http.Request, req Chat
 	if matchCount > 20 {
 		matchCount = 20
 	}
-	log.Printf("chat req=%s start session_id=%s message_len=%d match_count=%d topic_filter=%v",
-		reqID, strings.TrimSpace(req.SessionID), len(req.Message), matchCount, req.TopicFilter != nil)
-
 	sessionID := strings.TrimSpace(req.SessionID)
 	userID := strings.TrimSpace(derefString(req.UserID))
+	log.Printf("chat req=%s start session_id=%s user_id=%s message_len=%d match_count=%d topic_filter=%v",
+		reqID, sessionID, userID, len(req.Message), matchCount, req.TopicFilter != nil)
+
 	incomingQuotePDF := req.UserMeta != nil && boolMeta(req.UserMeta, "incoming_quote_pdf")
+	fromDBRelay := req.UserMeta != nil && boolMeta(req.UserMeta, "from_db_relay")
 	var history []chatMessageRow
 	var behavior *userBehaviorContext
 	if sessionID != "" {
@@ -66,10 +67,12 @@ func (s *Service) handleMessage(w http.ResponseWriter, r *http.Request, req Chat
 			}
 			if humanMode {
 				log.Printf("chat req=%s human mode=true skip ai", reqID)
-				if err := s.insertChatMessages(r.Context(), []chatMessageInsert{
-					{SessionID: sessionID, Role: "user", Content: req.Message, MetaData: map[string]interface{}{}},
-				}); err != nil {
-					log.Printf("chat req=%s insert messages failed: %v", reqID, err)
+				if !fromDBRelay {
+					if err := s.insertChatMessages(r.Context(), []chatMessageInsert{
+						{SessionID: sessionID, Role: "user", Content: req.Message, MetaData: map[string]interface{}{}},
+					}); err != nil {
+						log.Printf("chat req=%s insert messages failed: %v", reqID, err)
+					}
 				}
 				resp := ChatResponse{Answer: "", Products: nil, Knowledge: nil}
 				w.Header().Set("Content-Type", "application/json")
@@ -102,10 +105,12 @@ func (s *Service) handleMessage(w http.ResponseWriter, r *http.Request, req Chat
 		if sessionID != "" {
 			userMeta := mergeMeta(nil, req.UserMeta)
 			assistantMeta := map[string]interface{}{"slots": extractSlots(req.Message)}
-			if err := s.insertChatMessages(r.Context(), []chatMessageInsert{
-				{SessionID: sessionID, Role: "user", Content: req.Message, MetaData: userMeta},
-				{SessionID: sessionID, Role: "assistant", Content: answer, MetaData: assistantMeta},
-			}); err != nil {
+			rows := make([]chatMessageInsert, 0, 2)
+			if !fromDBRelay {
+				rows = append(rows, chatMessageInsert{SessionID: sessionID, Role: "user", Content: req.Message, MetaData: userMeta})
+			}
+			rows = append(rows, chatMessageInsert{SessionID: sessionID, Role: "assistant", Content: answer, MetaData: assistantMeta})
+			if err := s.insertChatMessages(r.Context(), rows); err != nil {
 				log.Printf("chat req=%s insert messages failed: %v", reqID, err)
 			}
 		}
@@ -124,10 +129,12 @@ func (s *Service) handleMessage(w http.ResponseWriter, r *http.Request, req Chat
 		}
 		if sessionID != "" {
 			userMeta := mergeMeta(nil, req.UserMeta)
-			if err := s.insertChatMessages(r.Context(), []chatMessageInsert{
-				{SessionID: sessionID, Role: "user", Content: req.Message, MetaData: userMeta},
-				{SessionID: sessionID, Role: "assistant", Content: answer, MetaData: map[string]interface{}{}},
-			}); err != nil {
+			rows := make([]chatMessageInsert, 0, 2)
+			if !fromDBRelay {
+				rows = append(rows, chatMessageInsert{SessionID: sessionID, Role: "user", Content: req.Message, MetaData: userMeta})
+			}
+			rows = append(rows, chatMessageInsert{SessionID: sessionID, Role: "assistant", Content: answer, MetaData: map[string]interface{}{}})
+			if err := s.insertChatMessages(r.Context(), rows); err != nil {
 				log.Printf("chat req=%s insert messages failed: %v", reqID, err)
 			}
 		}
@@ -187,14 +194,26 @@ func (s *Service) handleMessage(w http.ResponseWriter, r *http.Request, req Chat
 	var products []SupabaseMatch
 	if needProducts {
 		productsStart := time.Now()
-		products, err = s.searchProductsHybrid(r.Context(), req.Message, vector, matchCount)
-		if err != nil {
-			log.Printf("chat req=%s supabase products failed: %v", reqID, err)
-			http.Error(w, "supabase products search failed", http.StatusBadGateway)
-			return
+		docArticles := stringSliceMeta(req.UserMeta, "document_articles")
+		if len(docArticles) > 0 {
+			products, err = s.searchProductsByArticles(r.Context(), docArticles, matchCount)
+			if err != nil {
+				log.Printf("chat req=%s document articles search failed: %v", reqID, err)
+			}
+			if len(products) > 0 {
+				log.Printf("chat req=%s products by articles ok count=%d ids=%s took=%s", reqID, len(products), joinProductIDs(products, 5), time.Since(productsStart))
+			}
 		}
-		log.Printf("chat req=%s products ok count=%d ids=%s names=%s took=%s",
-			reqID, len(products), joinProductIDs(products, 5), joinProductNames(products, 3), time.Since(productsStart))
+		if len(products) == 0 {
+			products, err = s.searchProductsHybrid(r.Context(), req.Message, vector, matchCount)
+			if err != nil {
+				log.Printf("chat req=%s supabase products failed: %v", reqID, err)
+				http.Error(w, "supabase products search failed", http.StatusBadGateway)
+				return
+			}
+			log.Printf("chat req=%s products ok count=%d ids=%s names=%s took=%s",
+				reqID, len(products), joinProductIDs(products, 5), joinProductNames(products, 3), time.Since(productsStart))
+		}
 	}
 	if len(products) == 0 && isFollowUpMessage(req.Message) {
 		reused, err := s.loadProductsFromHistory(r.Context(), history)
@@ -229,10 +248,12 @@ func (s *Service) handleMessage(w http.ResponseWriter, r *http.Request, req Chat
 				userMeta["kp_accept"] = true
 			}
 			assistantMeta := map[string]interface{}{"kp_pdf": true}
-			if err := s.insertChatMessages(r.Context(), []chatMessageInsert{
-				{SessionID: sessionID, Role: "user", Content: req.Message, MetaData: userMeta},
-				{SessionID: sessionID, Role: "assistant", Content: "Сформировано КП", MetaData: assistantMeta},
-			}); err != nil {
+			rows := make([]chatMessageInsert, 0, 2)
+			if !fromDBRelay {
+				rows = append(rows, chatMessageInsert{SessionID: sessionID, Role: "user", Content: req.Message, MetaData: userMeta})
+			}
+			rows = append(rows, chatMessageInsert{SessionID: sessionID, Role: "assistant", Content: "Сформировано КП", MetaData: assistantMeta})
+			if err := s.insertChatMessages(r.Context(), rows); err != nil {
 				log.Printf("chat req=%s insert messages failed: %v", reqID, err)
 			}
 		}
@@ -313,10 +334,12 @@ func (s *Service) handleMessage(w http.ResponseWriter, r *http.Request, req Chat
 		}
 
 		log.Printf("chat req=%s persist session_id=%s user_meta=%t assistant_meta_keys=%d", reqID, sessionID, len(userMeta) > 0, len(assistantMeta))
-		if err := s.insertChatMessages(r.Context(), []chatMessageInsert{
-			{SessionID: sessionID, Role: "user", Content: req.Message, MetaData: userMeta},
-			{SessionID: sessionID, Role: "assistant", Content: answer, MetaData: assistantMeta},
-		}); err != nil {
+		rows := make([]chatMessageInsert, 0, 2)
+		if !fromDBRelay {
+			rows = append(rows, chatMessageInsert{SessionID: sessionID, Role: "user", Content: req.Message, MetaData: userMeta})
+		}
+		rows = append(rows, chatMessageInsert{SessionID: sessionID, Role: "assistant", Content: answer, MetaData: assistantMeta})
+		if err := s.insertChatMessages(r.Context(), rows); err != nil {
 			log.Printf("chat req=%s insert messages failed: %v", reqID, err)
 		} else {
 			log.Printf("chat req=%s insert messages ok", reqID)
@@ -346,6 +369,31 @@ func boolMeta(meta map[string]interface{}, key string) bool {
 		return strings.EqualFold(strings.TrimSpace(t), "true")
 	default:
 		return false
+	}
+}
+
+func stringSliceMeta(meta map[string]interface{}, key string) []string {
+	if meta == nil {
+		return nil
+	}
+	v, ok := meta[key]
+	if !ok || v == nil {
+		return nil
+	}
+	switch t := v.(type) {
+	case []string:
+		return t
+	case []interface{}:
+		out := make([]string, 0, len(t))
+		for _, item := range t {
+			s := strings.TrimSpace(fmt.Sprintf("%v", item))
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
 	}
 }
 

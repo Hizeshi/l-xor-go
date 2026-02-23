@@ -32,6 +32,9 @@ func NewRouter(cfg config.Config, db *postgres.DB) http.Handler {
 			r.Post("/chat", h.Chat)
 			r.Post("/chat/media", h.ChatMedia)
 			r.Post("/products/images", h.UploadProductImages)
+			r.Post("/products/images/item", h.AddProductImage)
+			r.Put("/products/images/item", h.UpdateProductImage)
+			r.Delete("/products/images/item", h.DeleteProductImage)
 		})
 	})
 

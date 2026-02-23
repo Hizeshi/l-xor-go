@@ -32,12 +32,18 @@ func (s *Service) HandleMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	messageType := strings.TrimSpace(r.FormValue("message_type"))
-	sessionID := strings.TrimSpace(r.FormValue("session_id"))
-	userID := strings.TrimSpace(r.FormValue("user_id"))
+	messageType := firstNonEmptyFormValue(r, "message_type", "messageType")
+	sessionID := firstNonEmptyFormValue(r, "session_id", "sessionId")
+	userID := firstNonEmptyFormValue(r, "user_id", "userId")
 	extraText := firstNonEmptyFormValue(r, "extra_text", "text", "message", "caption")
-	matchCount := parseIntDefault(r.FormValue("match_count"), 5)
-	topicFilter := strings.TrimSpace(r.FormValue("topic_filter"))
+	matchCount := parseIntDefault(firstNonEmptyFormValue(r, "match_count", "matchCount"), 5)
+	topicFilter := firstNonEmptyFormValue(r, "topic_filter", "topicFilter")
+
+	if sessionID == "" {
+		log.Printf("chat media: missing session_id")
+		http.Error(w, "session_id is required", http.StatusBadRequest)
+		return
+	}
 
 	file, fh, err := firstFormFile(r, "file", "media", "image", "photo", "document", "audio")
 	if err != nil {
@@ -84,9 +90,17 @@ func (s *Service) HandleMedia(w http.ResponseWriter, r *http.Request) {
 	case "document":
 		log.Printf("chat media: document file=%s size=%d mime=%s", fh.Filename, len(data), contentType)
 		message, err = s.extractDocumentText(r.Context(), fh.Filename, contentType, data)
-		if err == nil && isLikelyQuoteDocument(fh.Filename, message) {
-			userMeta["incoming_quote_pdf"] = true
-			message = buildDocumentProductSearchMessage(message)
+		if err == nil {
+			articles := extractDocumentArticles(message, 200)
+			if len(articles) > 0 {
+				userMeta["document_articles"] = articles
+			}
+			if isLikelyQuoteDocument(fh.Filename, message) {
+				userMeta["incoming_quote_pdf"] = true
+			}
+			if len(articles) > 0 || boolMeta(userMeta, "incoming_quote_pdf") {
+				message = buildDocumentProductSearchMessage(message)
+			}
 		}
 	default:
 		log.Printf("chat media: unsupported message_type=%s", messageType)
@@ -103,6 +117,12 @@ func (s *Service) HandleMedia(w http.ResponseWriter, r *http.Request) {
 			message = strings.TrimSpace(message) + "\n" + extraText
 		} else {
 			message = extraText
+		}
+	}
+	if messageType == "photo" || messageType == "document" {
+		trimmed := strings.TrimSpace(message)
+		if trimmed != "" && !strings.HasPrefix(strings.ToLower(trimmed), "bot:") {
+			message = "bot: " + trimmed
 		}
 	}
 
